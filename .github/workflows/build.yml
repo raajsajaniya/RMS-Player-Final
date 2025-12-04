@@ -1,17 +1,194 @@
-[app]
-title = RMS Player
-package.name = rmsplayer
-package.domain = org.rms
-source.dir = .
-source.include_exts = py,png,jpg,kv,atlas
-version = 1.0
-requirements = python3,kivy==2.2.0,kivymd==1.1.1,requests,urllib3,openssl,ffpyplayer,sdl2_ttf==2.20.2,pillow
-orientation = portrait
-fullscreen = 0
-android.permissions = INTERNET,ACCESS_NETWORK_STATE
-android.archs = arm64-v8a
-android.allow_backup = True
+import threading
+import requests
+import random
+import string
+from kivy.lang import Builder
+from kivymd.app import MDApp
+from kivymd.uix.screen import MDScreen
+from kivymd.uix.boxlayout import MDBoxLayout
+from kivymd.toast import toast
+from kivy.clock import Clock
+from kivy.properties import StringProperty
+from kivymd.uix.list import OneLineIconListItem
 
-[buildozer]
-log_level = 2
-warn_on_root = 1
+# --- KV DESIGN ---
+KV = '''
+<ChannelItem>:
+    theme_text_color: "Custom"
+    text_color: 1, 1, 1, 1
+    IconLeftWidget:
+        icon: "television"
+        theme_text_color: "Custom"
+        text_color: 0, 0.89, 1, 1
+
+MDScreen:
+    name: "home"
+    
+    MDBoxLayout:
+        orientation: 'vertical'
+        md_bg_color: 0.06, 0.06, 0.08, 1
+
+        MDTopAppBar:
+            title: "RMS Player"
+            elevation: 4
+            pos_hint: {"top": 1}
+            md_bg_color: 0.1, 0.1, 0.12, 1
+            specific_text_color: 0, 0.89, 1, 1
+            right_action_items: [["refresh", lambda x: app.refresh_connection()]]
+
+        # Video Player Placeholder
+        MDBoxLayout:
+            id: video_container
+            orientation: 'vertical'
+            size_hint_y: 0.40
+            padding: 5
+            spacing: 5
+            md_bg_color: 0, 0, 0, 1
+            
+            MDLabel:
+                text: "Video Player Area"
+                halign: "center"
+                theme_text_color: "Custom"
+                text_color: 1, 1, 1, 1
+
+            MDBoxLayout:
+                size_hint_y: None
+                height: "50dp"
+                spacing: 10
+                padding: 10
+                adaptive_width: True
+                pos_hint: {"center_x": .5}
+
+                MDIconButton:
+                    icon: "play"
+                    theme_text_color: "Custom"
+                    text_color: 0, 1, 0, 1
+                    on_release: app.play_channel("Test", "")
+
+        MDBoxLayout:
+            orientation: 'vertical'
+            padding: 10
+            spacing: 10
+            
+            MDBoxLayout:
+                size_hint_y: None
+                height: "120dp"
+                orientation: "vertical"
+                spacing: 10
+                
+                MDTextField:
+                    id: url_field
+                    hint_text: "Portal URL"
+                    text: "http://portal.com/c/"
+                    mode: "rectangle"
+                    color_mode: 'custom'
+                    line_color_focus: 0, 0.89, 1, 1
+                    text_color_normal: 1, 1, 1, 1
+                    text_color_focus: 1, 1, 1, 1
+                    
+                MDTextField:
+                    id: mac_field
+                    hint_text: "MAC Address"
+                    text: "00:1A:79:..."
+                    mode: "rectangle"
+                    color_mode: 'custom'
+                    line_color_focus: 0, 0.89, 1, 1
+                    text_color_normal: 1, 1, 1, 1
+                    text_color_focus: 1, 1, 1, 1
+
+                MDRaisedButton:
+                    text: "CONNECT"
+                    size_hint_x: 1
+                    md_bg_color: 0, 0.89, 1, 1
+                    text_color: 0, 0, 0, 1
+                    on_release: app.connect_source()
+
+            RecycleView:
+                id: rv
+                viewclass: 'ChannelItem'
+                RecycleBoxLayout:
+                    default_size: None, dp(48)
+                    default_size_hint: 1, None
+                    size_hint_y: None
+                    height: self.minimum_height
+                    orientation: 'vertical'
+'''
+
+class ChannelItem(OneLineIconListItem):
+    url = StringProperty()
+    def on_release(self):
+        pass
+
+class StalkerClient:
+    def __init__(self, url, mac):
+        self.mac = mac.upper()
+        self.sn = "002021" + ''.join(random.choices(string.digits, k=7))
+        self.device_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=12))
+        self.base_url = url.split("/c/")[0]
+        if not self.base_url.endswith("/"): self.base_url += "/"
+        self.api_url = f"{self.base_url}server/load.php"
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 4 rev: 2721 Safari/533.3',
+            'Cookie': f'mac={self.mac}; stb_lang=en; timezone=Europe/Kiev;',
+            'Authorization': f'Bearer {self.mac}'
+        })
+        self.token = None
+
+    def handshake(self):
+        try:
+            params = {'type': 'stb', 'action': 'handshake', 'token': '', 'mac': self.mac, 'stb_type': 'MAG254', 'sn': self.sn, 'device_id': self.device_id, 'device_id2': self.device_id}
+            r = self.session.get(self.api_url, params=params, timeout=10)
+            data = r.json()
+            if 'js' in data and 'token' in data['js']:
+                self.token = data['js']['token']
+                self.session.headers.update({'Authorization': f"Bearer {self.token}"})
+                self.session.cookies.set('stb_token', self.token)
+                self.session.get(self.api_url, params={'type': 'stb', 'action': 'get_profile'}, timeout=8)
+                return True
+        except: pass
+        return False
+
+    def get_channels(self):
+        try:
+            r = self.session.get(self.api_url, params={'type': 'itv', 'action': 'get_all_channels'}, timeout=15)
+            return r.json().get('js', {}).get('data', [])
+        except: return []
+
+class RMSAndroidApp(MDApp):
+    def build(self):
+        self.theme_cls.theme_style = "Dark"
+        self.theme_cls.primary_palette = "Cyan"
+        self.channels = []
+        return Builder.load_string(KV)
+
+    def connect_source(self):
+        url = self.root.ids.url_field.text
+        mac = self.root.ids.mac_field.text
+        if not url or not mac:
+            toast("Enter URL & MAC")
+            return
+        toast("Connecting...")
+        threading.Thread(target=self.worker_connect, args=(url, mac)).start()
+
+    def worker_connect(self, url, mac):
+        client = StalkerClient(url, mac)
+        if client.handshake():
+            data = client.get_channels()
+            self.channels = [{'text': ch['name'], 'url': ch.get('cmd', '')} for ch in data]
+            Clock.schedule_once(self.update_list)
+        else:
+            Clock.schedule_once(lambda x: toast("Login Failed"))
+
+    def update_list(self, dt):
+        self.root.ids.rv.data = self.channels
+        toast(f"Loaded {len(self.channels)} Channels")
+
+    def play_channel(self, name, url):
+        toast(f"Playing {name}")
+
+    def refresh_connection(self):
+        pass
+
+if __name__ == '__main__':
+    RMSAndroidApp().run()
